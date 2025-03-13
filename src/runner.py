@@ -19,10 +19,10 @@ from utils.gdp_forecaster import GDPForecaster
 from utils.utils import generate_report
 
 # Configuration - modify these variables as needed
-COUNTRY_CODE = "USA"          # Change to analyze different countries
-FORECAST_HORIZON = 5          # Number of years to forecast
-BACKTEST_YEARS = 3            # Number of years for backtesting
-COMPARISON_COUNTRIES = ["DEU", "FRA", "GBR"]  # Leave empty list [] for no comparison
+COUNTRY_CODE = "USA"
+FORECAST_HORIZON = 5
+BACKTEST_YEARS = 3
+COMPARISON_COUNTRIES = ["DEU", "FRA", "GBR"]
 
 # Setup output directory
 PROJECT_ROOT = Path(__file__).parents[1]  # Go up one level from src
@@ -41,7 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('gdp_forecast')
 
-
+# Run Forecast
 def run_forecast():
     """Run the GDP forecast and save results."""
     logger.info(f"Starting GDP forecast for {COUNTRY_CODE}")
@@ -143,7 +143,7 @@ def run_forecast():
     logger.info("Forecast completed successfully")
     return forecaster
 
-
+# Main
 if __name__ == "__main__":
     try:
         forecaster = run_forecast()
