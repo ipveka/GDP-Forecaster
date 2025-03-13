@@ -15,7 +15,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger('variable_forecaster')
 
-
 class VariableForecaster:
     """Class to forecast individual variables using appropriate time series methods."""
     

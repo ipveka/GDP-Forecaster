@@ -16,7 +16,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger('data_collector')
 
-
 class DataCollector:
     """Class to collect and preprocess data from various sources."""
     
