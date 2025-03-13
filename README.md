@@ -18,6 +18,7 @@ The GDP Forecaster is a Python-based forecasting system that leverages historica
 - Performs sensitivity analysis for key variables
 - Provides confidence intervals for forecast uncertainty
 - Enables cross-country and regional comparisons
+- Streamlit app to run the project
 
 ## Setup and Installation
 
@@ -132,7 +133,8 @@ The forecaster pulls data from several authoritative sources:
 
 - `data/`: Cached data from various sources
 - `notebooks/`: Jupyter notebooks with example analyses
-  - `gdp_forecast_example.ipynb`: Interactive notebook for GDP forecasting
+  - `data_exploration.ipynb`: Interactive notebook for economic analysis
+  - `forecaster.ipynb`: Interactive notebook for forecasting GDP
 - `src/`: Source code including runnable scripts
   - `runner.py`: Main script for running GDP forecasts with customizable settings
 - `utils/`: Utility modules for data collection and forecasting

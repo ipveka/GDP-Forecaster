@@ -63,7 +63,7 @@ class VariableForecaster:
             forecast_values.append(next_value)
         
         forecast = pd.Series(
-            forecast_values[1:],  # Skip the initial value which is the last historical
+            forecast_values[1:],
             index=forecast_index
         )
         
@@ -97,7 +97,7 @@ class VariableForecaster:
             forecast_index = pd.date_range(
                 start=last_date + pd.DateOffset(years=1),
                 periods=horizon,
-                freq='YS'  # Year start
+                freq='YS'
             )
             
             # Forecast
