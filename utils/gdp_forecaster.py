@@ -91,8 +91,7 @@ class GDPForecaster:
         
         # Drop columns with too many missing values
         min_years = 5  # Require at least 5 years of data
-        cols_to_keep = [col for col in data.columns 
-                         if data[col].count() >= min_years]
+        cols_to_keep = [col for col in data.columns if data[col].count() >= min_years]
         
         if target_col not in cols_to_keep:
             raise ValueError(f"Target column {target_col} does not have enough data")
@@ -112,17 +111,7 @@ class GDPForecaster:
         # Drop rows where target is still NA after filling
         df = df.dropna(subset=[target_col])
         
-        # Handle outliers by capping extreme values
-        for col in df.columns:
-            if col != target_col:  # Don't modify the target
-                q1 = df[col].quantile(0.05)
-                q3 = df[col].quantile(0.95)
-                iqr = q3 - q1
-                lower_bound = q1 - 3 * iqr
-                upper_bound = q3 + 3 * iqr
-                df[col] = df[col].clip(lower=lower_bound, upper=upper_bound)
-        
-        # Save all features instead of removing correlated variables
+        # Save all features
         features = [col for col in df.columns if col != target_col]
         self.feature_names = features
         
@@ -176,7 +165,7 @@ class GDPForecaster:
         
         return pd.Series(forecast_values, index=forecast_index)
 
-    def train_model(self, test_years: int = 3, custom_data: pd.DataFrame = None) -> Dict[str, float]:
+    def train_model(self, test_years: int = 0, custom_data: pd.DataFrame = None) -> Dict[str, float]:
         """
         Train the model with increased weight on recent observations.
         
@@ -190,14 +179,6 @@ class GDPForecaster:
         # Prepare data
         X, y = self.prepare_features(data=custom_data)
         print(f"Features used for training: {list(X.columns)}")
-        
-        if len(X) <= test_years + 3:
-            logger.warning(f"Limited data available ({len(X)} years). Consider reducing test_years.")
-            test_years = min(1, len(X) - 3)  # Ensure at least 3 years for training
-            if test_years <= 0:
-                logger.warning(f"Not enough data for testing. Using simplified training approach.")
-                test_years = 0  # Use all data for training if there's not enough
-                
         X, y = X.sort_index(), y.sort_index()
         
         # Split data
@@ -210,7 +191,6 @@ class GDPForecaster:
             test_X, test_y = None, None
         
         # Apply sample weights to emphasize recent data - increased importance
-        # Use exponential weighting instead of linear to put more emphasis on recent data
         sample_weights = np.exp(np.linspace(0, 1, len(train_y)))
         sample_weights = sample_weights / np.mean(sample_weights)
         
@@ -291,7 +271,7 @@ class GDPForecaster:
                 return self._evaluate_model(test_X, test_y)
             else:
                 # If no test set, return basic metrics
-                return {'MSE': 0, 'RMSE': 0, 'MAPE': 0, 'R2': 1.0}
+                return {'MSE': 0, 'RMSE': 0, 'MAPE': 0, 'R2': 0}
             
         except Exception as e:
             logger.error(f"Model training failed: {str(e)}")
@@ -310,7 +290,7 @@ class GDPForecaster:
                 return self._evaluate_model(test_X, test_y)
             else:
                 # If no test set, return basic metrics
-                return {'MSE': 0, 'RMSE': 0, 'MAPE': 0, 'R2': 1.0}
+                return {'MSE': 0, 'RMSE': 0, 'MAPE': 0, 'R2': 0}
 
     def _evaluate_model(self, test_X: pd.DataFrame, test_y: pd.Series) -> Dict[str, float]:
         """Helper function to evaluate model performance."""
@@ -637,8 +617,6 @@ class GDPForecaster:
             
             ax1.plot(backtest_dates, self.backtest_results['Predicted'].values, 'D', 
                     color='orange', markersize=8, label='Rolling Backtest Predictions')
-            ax1.plot(backtest_dates, self.backtest_results['Actual'].values, 'D', 
-                    color='green', markersize=8, label='Rolling Backtest Actuals')
         
         # Plot forecasted GDP
         ax1.plot(self.gdp_forecast.index, self.gdp_forecast['GDP_Forecast'].values, 'o-', 
