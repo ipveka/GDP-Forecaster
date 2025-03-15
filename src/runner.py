@@ -56,12 +56,7 @@ def run_forecast():
     historical_data = forecaster.load_data(COUNTRY_CODE)
     logger.info(f"Loaded {len(historical_data)} years of historical data")
     
-    # Step 2: Train the model
-    logger.info(f"Training model with {BACKTEST_YEARS} years for testing")
-    metrics = forecaster.train_model(test_years=BACKTEST_YEARS)
-    logger.info(f"Model training complete. Test metrics: {metrics}")
-    
-    # Step 3: Run rolling backtests if requested
+    # Step 2: Run rolling backtests first to evaluate model performance
     backtest_metrics = None
     if RUN_ROLLING_BACKTESTS:
         logger.info(f"Running rolling backtests for the last {BACKTEST_YEARS} years")
@@ -80,6 +75,11 @@ def run_forecast():
             
             logger.info(f"Rolling backtest MAPE: {mape:.2f}%, RMSE: ${rmse/1e9:.2f}B")
     
+    # Step 3: Train the final model with all available data for forecasting
+    logger.info("Training final model with all available data for forecasting")
+    metrics = forecaster.train_model(test_years=0)  # Use all data for the forecasting model
+    logger.info(f"Model training complete. Metrics: {metrics}")
+    
     # Step 4: Analyze feature importance
     feature_importance = forecaster.get_model_coefficients()
     top_features = feature_importance.head(5)
@@ -97,13 +97,16 @@ def run_forecast():
     logger.info(f"Saved feature importance to {importance_path}")
     
     # Step 5: Generate forecast for covariates first
-    print(f"Forecasting economic indicators for the next {FORECAST_HORIZON} years...")
+    logger.info(f"Forecasting economic indicators for the next {FORECAST_HORIZON} years...")
     forecasted_features = forecaster.forecast_features(horizon=FORECAST_HORIZON)
     
     # Plot key forecasted covariates
     try:
+        # Exclude 'Year' from feature importance ranking
+        feature_importance_filtered = feature_importance[~feature_importance['Feature'].str.contains('Year', case=False)]
+
         # Select top 5 important features
-        top_features = feature_importance.head(5).reset_index(drop=True)
+        top_features = feature_importance_filtered.head(5).reset_index(drop=True)
         key_indicators = list(top_features['Feature'])
         
         # Create a figure with subplots for each indicator

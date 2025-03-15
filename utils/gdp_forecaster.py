@@ -59,27 +59,58 @@ class GDPForecaster:
         self.feature_selection_threshold = 0.001  # Min coefficient threshold
         self.backtest_results = None
         
-    def load_data(self, country_code: str) -> pd.DataFrame:
+    def create_features(self, X: pd.DataFrame) -> pd.DataFrame:
         """
-        Load historical data for a country.
+        Create additional features to improve model performance.
+        Only adds the year feature to capture temporal trends.
+        
+        Args:
+            X: DataFrame with original features
+            
+        Returns:
+            DataFrame with additional year feature
+        """
+        X_enhanced = X.copy()
+        
+        # Add year as a feature to capture temporal trends
+        X_enhanced['Year'] = X_enhanced.index.year
+        
+        return X_enhanced
+        
+    def load_data(self, country_code: str, max_history_years: int = 15) -> pd.DataFrame:
+        """
+        Load historical data for a country with option to limit history.
         
         Args:
             country_code: ISO 3-letter country code
-            
+            max_history_years: Maximum number of years of historical data to use (default: 15)
+                
         Returns:
             DataFrame with historical data
         """
         self.country_code = country_code
-        self.historical_data = self.data_collector.fetch_world_bank_data(country_code)
+        full_historical_data = self.data_collector.fetch_world_bank_data(country_code)
+        
+        # Limit to most recent years if specified
+        if max_history_years > 0 and len(full_historical_data) > max_history_years:
+            # Sort by date to ensure we get the most recent years
+            sorted_data = full_historical_data.sort_index()
+            self.historical_data = sorted_data.iloc[-max_history_years:]
+            logger.info(f"Limited historical data to most recent {max_history_years} years")
+        else:
+            self.historical_data = full_historical_data
+        
         return self.historical_data
     
-    def prepare_features(self, target_col: str = 'NY.GDP.MKTP.CD', data: pd.DataFrame = None) -> Tuple[pd.DataFrame, pd.Series]:
+    def prepare_features(self, target_col: str = 'NY.GDP.MKTP.CD', data: pd.DataFrame = None,
+                         create_additional_features: bool = True) -> Tuple[pd.DataFrame, pd.Series]:
         """
-        Prepare features for model training with improved preprocessing.
+        Prepare features for model training with improved preprocessing and feature creation.
         
         Args:
             target_col: The column to use as the target (GDP)
             data: Optional specific dataset to use (for backtesting)
+            create_additional_features: Whether to create additional features (default: True)
             
         Returns:
             Tuple of (X features, y target)
@@ -91,8 +122,7 @@ class GDPForecaster:
         
         # Drop columns with too many missing values
         min_years = 5  # Require at least 5 years of data
-        cols_to_keep = [col for col in data.columns 
-                         if data[col].count() >= min_years]
+        cols_to_keep = [col for col in data.columns if data[col].count() >= min_years]
         
         if target_col not in cols_to_keep:
             raise ValueError(f"Target column {target_col} does not have enough data")
@@ -112,23 +142,19 @@ class GDPForecaster:
         # Drop rows where target is still NA after filling
         df = df.dropna(subset=[target_col])
         
-        # Handle outliers by capping extreme values
-        for col in df.columns:
-            if col != target_col:  # Don't modify the target
-                q1 = df[col].quantile(0.05)
-                q3 = df[col].quantile(0.95)
-                iqr = q3 - q1
-                lower_bound = q1 - 3 * iqr
-                upper_bound = q3 + 3 * iqr
-                df[col] = df[col].clip(lower=lower_bound, upper=upper_bound)
-        
-        # Save all features instead of removing correlated variables
+        # Save all features
         features = [col for col in df.columns if col != target_col]
         self.feature_names = features
         
         # Separate features and target
         X = df[features]
         y = df[target_col]
+        
+        # Create additional features if requested
+        if create_additional_features:
+            X = self.create_features(X)
+            # Update feature names with new features
+            self.feature_names = list(X.columns)
         
         return X, y
     
@@ -176,28 +202,24 @@ class GDPForecaster:
         
         return pd.Series(forecast_values, index=forecast_index)
 
-    def train_model(self, test_years: int = 3, custom_data: pd.DataFrame = None) -> Dict[str, float]:
+    def train_model(self, test_years: int = 0, custom_data: pd.DataFrame = None,
+                    create_additional_features: bool = True, feature_selection: bool = True) -> Dict[str, float]:
         """
-        Train the model with increased weight on recent observations.
+        Train the model with improved hyperparameter selection and feature handling.
+        Fixed convergence issues by increasing max_iter and implementing more robust scaling.
         
         Args:
             test_years: Number of years to hold out for testing
             custom_data: Optional data to use for training (for backtesting)
+            create_additional_features: Whether to create additional features
+            feature_selection: Whether to perform feature selection
             
         Returns:
             Dictionary with performance metrics
         """
         # Prepare data
-        X, y = self.prepare_features(data=custom_data)
+        X, y = self.prepare_features(data=custom_data, create_additional_features=create_additional_features)
         print(f"Features used for training: {list(X.columns)}")
-        
-        if len(X) <= test_years + 3:
-            logger.warning(f"Limited data available ({len(X)} years). Consider reducing test_years.")
-            test_years = min(1, len(X) - 3)  # Ensure at least 3 years for training
-            if test_years <= 0:
-                logger.warning(f"Not enough data for testing. Using simplified training approach.")
-                test_years = 0  # Use all data for training if there's not enough
-                
         X, y = X.sort_index(), y.sort_index()
         
         # Split data
@@ -209,26 +231,29 @@ class GDPForecaster:
             train_X, train_y = X, y
             test_X, test_y = None, None
         
-        # Apply sample weights to emphasize recent data - increased importance
-        # Use exponential weighting instead of linear to put more emphasis on recent data
-        sample_weights = np.exp(np.linspace(0, 1, len(train_y)))
+        # Apply exponentially increasing sample weights with stronger emphasis on recent data
+        sample_weights = np.exp(np.linspace(0, 2, len(train_y)))
         sample_weights = sample_weights / np.mean(sample_weights)
         
-        # Define pipeline
+        # Check for potential scale issues
+        y_scale = np.abs(train_y).max()
+        logger.info(f"Target scale is approximately: {y_scale:.2e}")
+        
+        # Significantly increased max_iter and lowered tol for convergence issues
         pipeline = Pipeline([
             ('imputer', SimpleImputer(strategy='median')),
-            ('scaler', StandardScaler()),
-            ('model', ElasticNet(random_state=42, max_iter=10000))
+            ('scaler', RobustScaler()),
+            ('model', ElasticNet(random_state=42, max_iter=100000, tol=1e-6))
         ])
         
         # Skip cross-validation for very small datasets
         if len(train_X) < 5:
             logger.info(f"Small dataset detected ({len(train_X)} samples). Using simplified model without CV.")
-            # Use basic ElasticNet with default parameters
+            # Use basic ElasticNet with improved parameters for convergence
             self.pipeline = Pipeline([
                 ('imputer', SimpleImputer(strategy='median')),
-                ('scaler', StandardScaler()),
-                ('model', ElasticNet(alpha=1.0, l1_ratio=0.5, random_state=42, max_iter=10000))
+                ('scaler', RobustScaler()),
+                ('model', ElasticNet(alpha=1.0, l1_ratio=0.5, random_state=42, max_iter=100000, tol=1e-6))
             ])
             
             self.pipeline.fit(train_X, train_y, model__sample_weight=sample_weights)
@@ -241,38 +266,45 @@ class GDPForecaster:
                 # If no test set, return basic metrics
                 return {'MSE': 0, 'RMSE': 0, 'MAPE': 0, 'R2': 1.0}
         
-        # Define hyperparameter grid for larger datasets
+        # Improved hyperparameter grid with focus on convergence
         param_grid = {
-            'model__alpha': [0.01, 0.1, 1.0, 10.0, 100.0],
-            'model__l1_ratio': [0.2, 0.5, 0.8],
-            'model__tol': [1e-4],
+            'model__alpha': [0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0],
+            'model__l1_ratio': [0.1, 0.5, 0.9], 
+            'model__tol': [1e-6],
             'model__selection': ['cyclic']
         }
         
         # For very small datasets, reduce grid further
         if len(train_X) < 15:
             param_grid = {
-                'model__alpha': [0.1, 1.0, 10.0],
+                'model__alpha': [0.1, 1.0, 10.0, 100.0],
                 'model__l1_ratio': [0.5],
-                'model__tol': [1e-4],
+                'model__tol': [1e-6],
                 'model__selection': ['cyclic']
             }
         
-        # Cross-validation - adjust splits based on data size
-        n_splits = min(3, max(2, len(train_X) // 3))
-        tscv = TimeSeriesSplit(n_splits=n_splits)
+        # Improved cross-validation strategy - use more splits for larger datasets
+        n_splits = min(5, max(3, len(train_X) // 3))
+        tscv = TimeSeriesSplit(n_splits=n_splits, test_size=1)
         
-        # Perform grid search
+        # Try multiple scoring metrics and select best model
+        scorers = {
+            'neg_mean_squared_error': 'neg_mean_squared_error',
+            'neg_mean_absolute_percentage_error': 'neg_mean_absolute_percentage_error'
+        }
+        
+        # Perform grid search with multiple scoring metrics
         grid_search = GridSearchCV(
             estimator=pipeline,
             param_grid=param_grid,
             cv=tscv,
-            scoring='neg_mean_squared_error',
+            scoring=scorers,
+            refit='neg_mean_absolute_percentage_error',
             n_jobs=-1,
-            verbose=0
+            verbose=1
         )
         
-        # Fit model
+        # Fit model with robust error handling and fallbacks
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -286,21 +318,26 @@ class GDPForecaster:
             print(f"Best hyperparameters found: {best_params}")
             logger.info(f"Best parameters: {best_params}")
             
+            # Feature selection if enabled
+            if feature_selection and len(self.feature_names) > 5:
+                self._perform_feature_selection()
+            
             # Evaluate model
             if test_X is not None and test_y is not None:
                 return self._evaluate_model(test_X, test_y)
             else:
                 # If no test set, return basic metrics
-                return {'MSE': 0, 'RMSE': 0, 'MAPE': 0, 'R2': 1.0}
+                return {'MSE': 0, 'RMSE': 0, 'MAPE': 0, 'R2': 0}
             
         except Exception as e:
-            logger.error(f"Model training failed: {str(e)}")
-            logger.info("Falling back to simpler model...")
+            logger.error(f"ElasticNet model training failed: {str(e)}")
+            logger.info("Falling back to Ridge regression which is more robust...")
             
-            # Fallback to Ridge model
+            # Fallback to Ridge model with improved parameters
             self.pipeline = Pipeline([
-                ('scaler', StandardScaler()),
-                ('model', Ridge(alpha=100, random_state=42))
+                ('imputer', SimpleImputer(strategy='median')),
+                ('scaler', RobustScaler()),
+                ('model', Ridge(alpha=100.0, random_state=42, solver='svd', max_iter=10000))
             ])
             self.pipeline.fit(train_X, train_y, model__sample_weight=sample_weights)
             self.model = self.pipeline.named_steps['model']
@@ -310,7 +347,32 @@ class GDPForecaster:
                 return self._evaluate_model(test_X, test_y)
             else:
                 # If no test set, return basic metrics
-                return {'MSE': 0, 'RMSE': 0, 'MAPE': 0, 'R2': 1.0}
+                return {'MSE': 0, 'RMSE': 0, 'MAPE': 0, 'R2': 0}
+
+    def _perform_feature_selection(self):
+        """Perform feature selection by removing features with near-zero coefficients."""
+        if not hasattr(self.model, 'coef_'):
+            return
+        
+        # Get absolute coefficients
+        coefs = np.abs(self.model.coef_)
+        
+        # Find features with non-zero coefficients
+        non_zero_features = []
+        zero_features = []
+        
+        for i, feature in enumerate(self.feature_names):
+            if coefs[i] > self.feature_selection_threshold:
+                non_zero_features.append(feature)
+            else:
+                zero_features.append(feature)
+        
+        if zero_features:
+            logger.info(f"Removed {len(zero_features)} features with near-zero coefficients")
+            logger.debug(f"Removed features: {zero_features}")
+            
+            # Update feature names
+            self.feature_names = non_zero_features
 
     def _evaluate_model(self, test_X: pd.DataFrame, test_y: pd.Series) -> Dict[str, float]:
         """Helper function to evaluate model performance."""
@@ -326,7 +388,7 @@ class GDPForecaster:
 
     def forecast_features(self, horizon: int = 5, cutoff_date: pd.Timestamp = None) -> pd.DataFrame:
         """
-        Forecast all features for the specified horizon.
+        Forecast all features with improved error handling and year feature support.
         
         Args:
             horizon: Number of years to forecast
@@ -348,6 +410,10 @@ class GDPForecaster:
         failed_features = []
         
         for feature in self.feature_names:
+            # Skip year feature as it will be added later
+            if feature == 'Year':
+                continue
+                
             start_time = time.time()
             historical_series = historical_data[feature].copy()
             
@@ -394,13 +460,15 @@ class GDPForecaster:
         
         return self.forecasted_features
     
-    def forecast_gdp(self, horizon: int = 5, cutoff_date: pd.Timestamp = None) -> pd.DataFrame:
+    def forecast_gdp(self, horizon: int = 5, cutoff_date: pd.Timestamp = None,
+                     create_additional_features: bool = True) -> pd.DataFrame:
         """
-        Forecast GDP using the trained model with improved error handling.
+        Forecast GDP using the trained model with year feature.
         
         Args:
             horizon: Number of years to forecast
             cutoff_date: Optional cutoff date for backtesting
+            create_additional_features: Whether to create additional features
             
         Returns:
             DataFrame with GDP forecast
@@ -408,30 +476,28 @@ class GDPForecaster:
         if self.pipeline is None:
             raise ValueError("Model not trained. Call train_model() first.")
         
-        if self.forecasted_features is None or cutoff_date is not None:
-            self.forecast_features(horizon, cutoff_date)
-        
-        # Handle case where some features couldn't be forecasted
-        missing_features = set(self.feature_names) - set(self.forecasted_features.columns)
-        if missing_features:
-            logger.warning(f"Some features are missing from forecasts: {missing_features}")
-            # Update feature names to match what's available
-            self.feature_names = [f for f in self.feature_names if f in self.forecasted_features.columns]
-        
         # Check if we have enough features
         if len(self.feature_names) == 0:
             raise ValueError("No features available for forecasting. Check feature forecasts.")
+
+        # First get the feature forecasts
+        if self.forecasted_features is None or cutoff_date is not None:
+            self.forecast_features(horizon, cutoff_date)
+        
+        # Create additional features if requested
+        if create_additional_features:
+            forecast_features_ready = self.create_features(self.forecasted_features)
         
         # Reorder columns to match the expected feature order
-        forecast_features = self.forecasted_features[self.feature_names].copy()
+        forecast_features_ready = forecast_features_ready[self.feature_names]
         
-        # Make predictions using the pipeline (handles scaling internally)
-        gdp_forecast = self.pipeline.predict(forecast_features)
+        # Make predictions using the pipeline
+        gdp_forecast = self.pipeline.predict(forecast_features_ready)
         
         # Create DataFrame with results
         self.gdp_forecast = pd.DataFrame({
             'GDP_Forecast': gdp_forecast
-        }, index=forecast_features.index)
+        }, index=forecast_features_ready.index)
         
         # Add growth rate
         last_historical_gdp = None
@@ -450,12 +516,18 @@ class GDPForecaster:
         
         return self.gdp_forecast
     
-    def run_rolling_backtests(self, n_years: int = 3) -> pd.DataFrame:
+    def run_rolling_backtests(self, n_years: int = 3, create_additional_features: bool = True) -> pd.DataFrame:
         """
-        Run rolling backtests for the last N available years in the data.
+        Run rolling backtests for the last N available years with proper feature forecasting.
+        
+        This implementation properly simulates a real forecasting scenario by:
+        1. Using only data up to the cutoff date for training
+        2. Forecasting ALL features for the test year (no data leakage)
+        3. Using those forecasted features to predict GDP
         
         Args:
             n_years: Number of years to backtest
+            create_additional_features: Whether to create additional features
             
         Returns:
             DataFrame with backtest results
@@ -467,9 +539,9 @@ class GDPForecaster:
         years = sorted(list(set([date.year for date in self.historical_data.index])))
         
         # Ensure we have enough years to backtest
-        if len(years) < n_years + 3:  # Need at least 3 years to train
-            logger.warning(f"Not enough years for {n_years} backtests. Using {len(years)-3} backtests.")
-            n_years = max(1, len(years) - 3)
+        if len(years) < n_years + 5:  # Need at least 5 years to train
+            logger.warning(f"Not enough years for {n_years} backtests. Using {len(years)-5} backtests.")
+            n_years = max(1, len(years) - 5)
             
         # Setup backtest results storage
         years_to_test = years[-n_years:]
@@ -501,42 +573,39 @@ class GDPForecaster:
             # Get historical data up to cutoff date
             historical_subset = self.historical_data.loc[:cutoff_date].copy()
             
-            # Create a temporary forecaster for this test
-            temp_forecaster = GDPForecaster()
-            temp_forecaster.country_code = self.country_code
-            temp_forecaster.historical_data = historical_subset
-            
-            # Skip cross-validation for very small datasets
             try:
-                # Prepare features directly for small datasets
-                X, y = temp_forecaster.prepare_features()
-                min_years_for_cv = 10  # Minimum years needed for cross-validation
+                # Create a fresh temporary forecaster for this test to avoid any state carryover
+                temp_forecaster = GDPForecaster()
+                temp_forecaster.country_code = self.country_code
+                temp_forecaster.historical_data = historical_subset
                 
-                if len(X) < min_years_for_cv:
-                    logger.warning(f"Limited data for {test_year} ({len(X)} years). Using simplified model without CV.")
-                    # Use direct training without cross-validation
-                    sample_weights = np.exp(np.linspace(0, 1, len(X)))
-                    sample_weights = sample_weights / np.mean(sample_weights)
-                    
-                    # Simple pipeline
-                    pipeline = Pipeline([
-                        ('imputer', SimpleImputer(strategy='median')),
-                        ('scaler', StandardScaler()),
-                        ('model', ElasticNet(alpha=1.0, l1_ratio=0.5, random_state=42, max_iter=10000))
-                    ])
-                    
-                    # Fit directly without CV
-                    pipeline.fit(X, y, model__sample_weight=sample_weights)
-                    temp_forecaster.pipeline = pipeline
-                    temp_forecaster.model = pipeline.named_steps['model']
-                    temp_forecaster.feature_names = list(X.columns)
-                else:
-                    # Use regular training with CV for larger datasets
-                    temp_forecaster.train_model(test_years=0)  # Use all data for training
+                # Pass our simplified create_features method
+                temp_forecaster.create_features = self.create_features.__get__(temp_forecaster, GDPForecaster)
                 
-                # Forecast 1 year ahead
-                forecast_result = temp_forecaster.forecast_gdp(horizon=1)
-                prediction = forecast_result['GDP_Forecast'].iloc[0]
+                # First train the model on historical data up to cutoff
+                temp_forecaster.train_model(test_years=0, create_additional_features=create_additional_features)
+                
+                # Save the feature names that were used in training
+                trained_feature_names = temp_forecaster.feature_names.copy()
+                
+                # Forecast features for test year using only data up to cutoff date
+                forecasted_features = temp_forecaster.forecast_features(horizon=1, cutoff_date=cutoff_date)
+                
+                # Add Year feature if it was used in training
+                if 'Year' in trained_feature_names:
+                    forecasted_features['Year'] = forecasted_features.index.year
+                
+                # Ensure that the forecasted features match those used in training
+                for feature in trained_feature_names:
+                    if feature not in forecasted_features.columns:
+                        logger.warning(f"Feature {feature} used in training is missing in forecast. Using zeros.")
+                        forecasted_features[feature] = 0
+                
+                # Keep only the features used in training
+                forecast_features_final = forecasted_features[trained_feature_names].copy()
+                
+                # Use the prepared features to predict GDP for test year
+                prediction = temp_forecaster.pipeline.predict(forecast_features_final)[0]
                 
                 # Store results
                 actuals[test_year] = actual_value
@@ -549,13 +618,16 @@ class GDPForecaster:
                     'Actual': actual_value,
                     'Predicted': prediction,
                     'Error': error,
-                    'Percent_Error': pct_error
+                    'Percent_Error': pct_error,
+                    'Feature_Forecast_Date': forecasted_features.index[0].strftime('%Y-%m-%d')
                 }
                 
                 logger.info(f"  Actual: {actual_value:.2f}, Predicted: {prediction:.2f}, Error: {error:.2f} ({pct_error:.2f}%)")
                 
             except Exception as e:
                 logger.error(f"Backtest failed for {test_year}: {str(e)}")
+                import traceback
+                logger.error(traceback.format_exc())
                 continue
                 
         # Combine results into a DataFrame
@@ -637,8 +709,6 @@ class GDPForecaster:
             
             ax1.plot(backtest_dates, self.backtest_results['Predicted'].values, 'D', 
                     color='orange', markersize=8, label='Rolling Backtest Predictions')
-            ax1.plot(backtest_dates, self.backtest_results['Actual'].values, 'D', 
-                    color='green', markersize=8, label='Rolling Backtest Actuals')
         
         # Plot forecasted GDP
         ax1.plot(self.gdp_forecast.index, self.gdp_forecast['GDP_Forecast'].values, 'o-', 
@@ -949,5 +1019,104 @@ class GDPForecaster:
         # Add gridlines
         ax.grid(True, linestyle='--', alpha=0.7)
         
+        plt.tight_layout()
+        return fig
+        
+    def plot_backtest_feature_forecasts(self, feature_names=None, test_year=None):
+        """
+        Plot comparison between actual vs. forecasted features for backtests.
+        
+        Args:
+            feature_names: List of features to plot (default: top 5 features by importance)
+            test_year: Specific test year to analyze (default: most recent backtest year)
+            
+        Returns:
+            Matplotlib figure comparing actual vs forecasted feature values
+        """
+        if self.backtest_results is None:
+            raise ValueError("No backtest results available. Call run_rolling_backtests() first.")
+            
+        # Select test year if not specified
+        if test_year is None:
+            test_year = self.backtest_results.index[-1]
+            
+        # If feature_names not specified, get top features by importance
+        if feature_names is None and self.model is not None:
+            coef_df = self.get_model_coefficients()
+            feature_names = coef_df.head(5)['Feature'].tolist()
+        elif feature_names is None:
+            # Default to a few common economic indicators
+            feature_names = [col for col in self.historical_data.columns 
+                           if col in ['NY.GDP.MKTP.KD.ZG', 'FP.CPI.TOTL.ZG', 'NE.EXP.GNFS.ZS']]
+                
+        # Create temporary forecaster to reproduce the backtest
+        temp_forecaster = GDPForecaster()
+        temp_forecaster.country_code = self.country_code
+        
+        # Find cutoff date (last date in the year before test_year)
+        cutoff_dates = self.historical_data.index[self.historical_data.index.year < test_year]
+        if len(cutoff_dates) == 0:
+            raise ValueError(f"No data before {test_year}")
+        
+        cutoff_date = cutoff_dates[-1]
+        
+        # Get actual data for the test year
+        actual_dates = self.historical_data.index[self.historical_data.index.year == test_year]
+        if len(actual_dates) == 0:
+            raise ValueError(f"No actual data for {test_year}")
+        
+        actual_date = actual_dates[0]
+        
+        # Get historical data up to cutoff date
+        historical_subset = self.historical_data.loc[:cutoff_date].copy()
+        temp_forecaster.historical_data = historical_subset
+        
+        # Create features method
+        temp_forecaster.create_features = self.create_features.__get__(temp_forecaster, GDPForecaster)
+        
+        # Forecast features for test year
+        forecasted_features = temp_forecaster.forecast_features(horizon=1, cutoff_date=cutoff_date)
+        
+        # Create figure
+        n_features = len(feature_names)
+        fig, axes = plt.subplots(n_features, 1, figsize=(10, n_features * 3))
+        
+        if n_features == 1:
+            axes = [axes]
+            
+        for i, feature in enumerate(feature_names):
+            ax = axes[i]
+            
+            # Get actual value
+            if feature in self.historical_data.columns:
+                actual_value = self.historical_data.loc[actual_date, feature]
+                
+                # Get forecasted value
+                if feature in forecasted_features.columns:
+                    forecast_value = forecasted_features.loc[forecasted_features.index[0], feature]
+                    
+                    # Calculate error
+                    error = actual_value - forecast_value
+                    pct_error = (error / actual_value * 100) if actual_value != 0 else float('inf')
+                    
+                    # Plot
+                    ax.bar(['Actual', 'Forecast', 'Error'], 
+                           [actual_value, forecast_value, error], 
+                           color=['blue', 'red', 'green'])
+                    
+                    # Add text with values
+                    ax.text(0, actual_value, f"{actual_value:.2f}", ha='center', va='bottom')
+                    ax.text(1, forecast_value, f"{forecast_value:.2f}", ha='center', va='bottom')
+                    ax.text(2, error, f"{error:.2f} ({pct_error:.2f}%)", ha='center', va='bottom')
+                    
+                    ax.set_title(f"{feature} - {test_year}")
+                    ax.grid(axis='y', linestyle='--', alpha=0.7)
+                else:
+                    ax.text(0.5, 0.5, f"Feature '{feature}' not forecasted", 
+                            ha='center', va='center', transform=ax.transAxes)
+            else:
+                ax.text(0.5, 0.5, f"Feature '{feature}' not in historical data", 
+                        ha='center', va='center', transform=ax.transAxes)
+                
         plt.tight_layout()
         return fig
