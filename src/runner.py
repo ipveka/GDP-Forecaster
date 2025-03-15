@@ -102,8 +102,11 @@ def run_forecast():
     
     # Plot key forecasted covariates
     try:
+        # Exclude 'Year' from feature importance ranking
+        feature_importance_filtered = feature_importance[~feature_importance['Feature'].str.contains('Year', case=False)]
+
         # Select top 5 important features
-        top_features = feature_importance.head(5).reset_index(drop=True)
+        top_features = feature_importance_filtered.head(5).reset_index(drop=True)
         key_indicators = list(top_features['Feature'])
         
         # Create a figure with subplots for each indicator
